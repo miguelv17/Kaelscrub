@@ -1,10 +1,11 @@
 # ============================================================
 #
-#   LIMPIEZA Y OPTIMIZACION DE WINDOWS 11
+#   MANTENIMIENTO Y LIMPIEZA DE WINDOWS
 #   ---------------------------------------------------------
-#   Version:      1.9
-#   Fecha:        2026-09-07
-#   Requiere:     Windows 11, PowerShell 5.1 o superior
+#   Version:      2.0
+#   Fecha:        2026-09-08
+#   Requiere:     Windows 10 o 11 (deteccion automatica),
+#                 PowerShell 5.1 o superior
 #   Permisos:     Administrador (se solicitan automaticamente)
 #
 #   DESCRIPCION:
@@ -14,12 +15,19 @@
 #   Tienda Windows, Delivery Optimization, iconos/fuentes,
 #   OneDrive y portapapeles. Ademas gestiona de forma opcional
 #   y con confirmacion: puntos de restauracion antiguos (+1 ano),
-#   Windows.old, programas de inicio, contrasenas guardadas en
-#   navegadores y perfiles de redes WiFi. Incluye verificacion
-#   de errores de disco (chkdsk /scan, solo lectura) y un
-#   escaneo rapido de Windows Defender. Al finalizar, muestra
-#   el espacio total en disco recuperado y un desglose por
-#   categoria.
+#   Windows.old, programas de inicio, apps en segundo plano,
+#   contrasenas guardadas en navegadores y perfiles de redes WiFi.
+#   Incluye verificacion de errores de disco (chkdsk /scan, solo
+#   lectura), un escaneo rapido de Windows Defender y un diagnostico
+#   de solo lectura de servicios de terceros en inicio automatico.
+#   Al finalizar, muestra el espacio total en disco recuperado y un
+#   desglose por categoria.
+#
+#   NOTA SOBRE EL NOMBRE: este script limpia y mantiene el sistema
+#   (espacio en disco, cachés, arranque, procesos en segundo plano).
+#   No modifica el scheduler de CPU, prioridades de proceso ni la
+#   gestion de memoria de Windows, por lo que se describe como
+#   "mantenimiento" y no como "optimizacion" de rendimiento.
 #
 #   NUEVO EN v1.5:
 #   - Crea automaticamente un Punto de Restauracion de seguridad
@@ -33,8 +41,8 @@
 #
 #   NUEVO EN v1.6:
 #   - En la primera ejecucion, el script se copia automaticamente
-#     a C:\optimizer\Limpiar_Optimizar_Windows11.ps1. Si programas la
-#     tarea automatica, siempre se ejecutara desde esa copia fija,
+#     a C:\optimizer\ (con su nombre de archivo actual). Si programas
+#     la tarea automatica, siempre se ejecutara desde esa copia fija,
 #     sin importar desde donde corriste el script originalmente.
 #   - La ejecucion automatica (semanal o mensual) queda programada
 #     a las 8:00 PM.
@@ -59,9 +67,39 @@
 #     silenciosa SEMANAL, se siguen omitiendo (para no alargar
 #     la tarea semanal).
 #
+#   NUEVO EN v2.0 (tras auditoria tecnica):
+#   - Se elimina la limpieza de Prefetch (no aporta rendimiento
+#     real; Windows lo gestiona automaticamente).
+#   - Los puntos de restauracion antiguos ahora se filtran por
+#     contexto ClientAccessible, para no afectar shadow copies
+#     usadas por software de backup de terceros.
+#   - El Liberador de espacio en disco (cleanmgr /sagerun:1) ahora
+#     configura su propio perfil de limpieza antes de ejecutarse,
+#     en vez de depender de un perfil preexistente que normalmente
+#     no existe (lo cual hacia que el paso no limpiara nada).
+#   - La tarea programada (semanal/mensual) ahora se crea para
+#     ejecutarse como SYSTEM, evitando que dependa de que el
+#     usuario tenga sesion iniciada a esa hora.
+#   - Se elimina el $ErrorActionPreference global "SilentlyContinue":
+#     cada operacion maneja sus propios errores explicitamente,
+#     para no ocultar fallos reales.
+#   - Deteccion de entorno: version de Windows, portatil/bateria y
+#     reinicio pendiente de Windows Update, mostrados en el resumen.
+#   - Nuevo paso: revision (con confirmacion) de apps UWP con
+#     permiso de ejecucion en segundo plano.
+#   - Nuevo paso: diagnostico (solo lectura, sin cambios) de
+#     servicios de terceros configurados en inicio automatico.
+#   - Rotacion de logs propios en C:\optimizer (se conservan los
+#     20 mas recientes).
+#   - Se renombra el script (antes "Limpiar_Optimizar_Windows11.ps1")
+#     a "Mantenimiento_Windows.ps1": el nombre anterior sugeria una
+#     optimizacion de rendimiento (CPU/RAM) que el script no realiza,
+#     y limitaba el nombre a Windows 11 pese a funcionar tambien en
+#     Windows 10 (ahora detectado automaticamente).
+#
 #   USO:
-#     .\Limpiar_Optimizar_Windows11.ps1            (modo normal, interactivo)
-#     .\Limpiar_Optimizar_Windows11.ps1 -Silent    (modo automatico/desatendido,
+#     .\Mantenimiento_Windows.ps1            (modo normal, interactivo)
+#     .\Mantenimiento_Windows.ps1 -Silent    (modo automatico/desatendido,
 #                                                    usado por la Tarea Programada;
 #                                                    omite todo lo que requiere
 #                                                    confirmacion manual)
@@ -95,13 +133,16 @@ if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     exit
 }
 
-$ErrorActionPreference = "SilentlyContinue"
+# Nota (v2.0): ya no se fuerza $ErrorActionPreference = "SilentlyContinue" a nivel
+# global. Cada operacion que puede fallar de forma esperada usa su propio
+# -ErrorAction SilentlyContinue o un bloque try/catch, para no ocultar errores
+# reales en operaciones que no los manejan explicitamente.
 $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 
 # --- Carpeta fija del script y de sus logs: C:\optimizer ---
 $optimizerDir = "C:\optimizer"
 if (-not (Test-Path $optimizerDir)) {
-    New-Item -Path $optimizerDir -ItemType Directory -Force | Out-Null
+    New-Item -Path $optimizerDir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
 }
 
 $logFile = "$optimizerDir\LimpiezaWindows_Log_$timestamp.txt"
@@ -111,6 +152,18 @@ function Log($msg) {
     Write-Host $msg -ForegroundColor Cyan
     $msg | Out-File $logFile -Append
 }
+
+# --- Rotacion de logs propios: conserva solo los 20 mas recientes de cada tipo ---
+function Invoke-LogRotation {
+    param([int]$Keep = 20)
+    foreach ($pattern in @("LimpiezaWindows_Log_*.txt", "ChkDsk_Resultado_*.txt")) {
+        Get-ChildItem -Path $optimizerDir -Filter $pattern -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -Skip $Keep |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+}
+Invoke-LogRotation
 
 function Get-FolderSizeMB($path) {
     if (Test-Path $path) {
@@ -123,7 +176,9 @@ function Get-FolderSizeMB($path) {
 # --- Copiar el script a una ubicacion estable (C:\optimizer) en la primera ejecucion ---
 # Esto asegura que la Tarea Programada (semanal/mensual) siempre tenga una copia
 # fija del script, sin importar desde donde el usuario lo ejecuto originalmente.
-$stableScriptPath = "$optimizerDir\Limpiar_Optimizar_Windows11.ps1"
+# NOTA (v2.0): antes el nombre iba hardcodeado; se deriva del nombre real del
+# script para no romper esta referencia si el archivo se vuelve a renombrar.
+$stableScriptPath = Join-Path $optimizerDir (Split-Path -Leaf $PSCommandPath)
 try {
     if (-not (Test-Path $stableScriptPath) -and $PSCommandPath -ne $stableScriptPath) {
         Copy-Item -Path $PSCommandPath -Destination $stableScriptPath -Force -ErrorAction Stop
@@ -133,10 +188,10 @@ try {
     Log "No se pudo copiar el script a $optimizerDir (la programacion automatica podria no estar disponible)."
 }
 
-$TotalSteps = 19
+$TotalSteps = 21
 function Step-Progress($Number, $Message) {
     $percent = [math]::Round(($Number / $TotalSteps) * 100)
-    Write-Progress -Activity "Limpieza y Optimizacion de Windows 11" -Status "[$Number/$TotalSteps] $Message ($percent%)" -PercentComplete $percent
+    Write-Progress -Activity "Mantenimiento y Limpieza de Windows" -Status "[$Number/$TotalSteps] $Message ($percent%)" -PercentComplete $percent
     Log "`n[$Number/$TotalSteps] $Message"
 }
 
@@ -154,6 +209,54 @@ $script:Summary = New-Object System.Collections.Generic.List[string]
 function Add-Summary($Text) {
     $script:Summary.Add($Text)
 }
+
+# --- Deteccion de entorno (v2.0): version de Windows, portatil/bateria, reinicio pendiente ---
+$osInfo = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
+$buildNumber = [int]($osInfo.BuildNumber)
+$script:WinVersionLabel = if ($buildNumber -ge 22000) { "Windows 11 (build $buildNumber)" }
+                          elseif ($buildNumber -gt 0) { "Windows 10 (build $buildNumber)" }
+                          else { "Version de Windows no detectada" }
+
+$batteryInfo = Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue
+$script:IsLaptop = [bool]$batteryInfo
+$script:OnBattery = $false
+$script:BatteryPercent = $null
+if ($batteryInfo) {
+    $script:BatteryPercent = $batteryInfo | Select-Object -First 1 -ExpandProperty EstimatedChargeRemaining -ErrorAction SilentlyContinue
+    # BatteryStatus 1 = descargando (con bateria, sin cargador conectado)
+    $script:OnBattery = ($batteryInfo | Select-Object -First 1 -ExpandProperty BatteryStatus -ErrorAction SilentlyContinue) -eq 1
+}
+
+$rebootKeys = @(
+    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending",
+    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired",
+    "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\PendingFileRenameOperations"
+)
+$script:PendingReboot = $false
+foreach ($rk in $rebootKeys) {
+    if (Test-Path $rk -ErrorAction SilentlyContinue) { $script:PendingReboot = $true }
+}
+
+Log "Entorno detectado: $script:WinVersionLabel"
+Add-Summary "Entorno: $script:WinVersionLabel."
+if ($script:IsLaptop) {
+    $bateriaTxt = if ($null -ne $script:BatteryPercent) { "$($script:BatteryPercent)%" } else { "desconocido" }
+    $fuenteTxt = if ($script:OnBattery) { "con bateria (sin cargador)" } else { "conectado a corriente" }
+    Log "Equipo portatil detectado - bateria: $bateriaTxt, $fuenteTxt."
+    Add-Summary "Equipo portatil: bateria $bateriaTxt, $fuenteTxt."
+} else {
+    Add-Summary "Equipo de escritorio (o sin bateria detectada)."
+}
+if ($script:PendingReboot) {
+    Log "AVISO: Windows tiene un reinicio pendiente (actualizacion u operacion de archivos)."
+    Add-Summary "Reinicio pendiente de Windows: SI - se recomienda reiniciar el equipo pronto."
+} else {
+    Add-Summary "Reinicio pendiente de Windows: no detectado."
+}
+
+# En ejecucion silenciosa mensual con el portatil en bateria y carga baja, se evitan
+# chkdsk y el escaneo de Defender (pueden tardar varios minutos y consumir CPU/disco).
+$script:SkipHeavyScansOnBattery = $script:IsLaptop -and $script:OnBattery -and ($null -ne $script:BatteryPercent) -and ($script:BatteryPercent -lt 30)
 
 # Wrapper de limpieza: mide el tamano ANTES de borrar (para el reporte),
 # y respeta el modo Dry Run (simulacion) sin eliminar nada realmente.
@@ -190,8 +293,8 @@ function Invoke-Clean {
 }
 
 Write-Host "=========================================" -ForegroundColor Green
-Write-Host "  LIMPIEZA Y OPTIMIZACION - WINDOWS 11" -ForegroundColor Green
-Write-Host "  Version 1.9  |  $(Get-Date -Format 'yyyy-MM-dd')" -ForegroundColor Green
+Write-Host "  MANTENIMIENTO Y LIMPIEZA DE WINDOWS" -ForegroundColor Green
+Write-Host "  Version 2.0  |  $(Get-Date -Format 'yyyy-MM-dd')" -ForegroundColor Green
 Write-Host "  Desarrollado por TheMikeWare" -ForegroundColor DarkGray
 Write-Host "  kaelvior.online" -ForegroundColor DarkGray
 Write-Host "=========================================" -ForegroundColor Green
@@ -222,7 +325,7 @@ if (-not $DryRun) {
     Log "`n[Preparacion] Creando punto de restauracion de seguridad..."
     try {
         Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction SilentlyContinue
-        Checkpoint-Computer -Description "Antes de Limpieza y Optimizacion Windows 11" -RestorePointType "MODIFY_SETTINGS" -ErrorAction Stop
+        Checkpoint-Computer -Description "Antes de Mantenimiento y Limpieza de Windows" -RestorePointType "MODIFY_SETTINGS" -ErrorAction Stop
         Log "  -> Punto de restauracion creado correctamente."
         Add-Summary "Punto de restauracion de seguridad: creado correctamente."
     } catch {
@@ -271,8 +374,11 @@ Step-Progress -Number 3 -Message "Eliminando archivos temporales..."
 $tempPaths = @(
     "$env:TEMP\*",
     "$env:WINDIR\Temp\*",
-    "$env:WINDIR\Prefetch\*",
     "$env:LOCALAPPDATA\Temp\*"
+    # NOTA (v2.0): se retiro $env:WINDIR\Prefetch\* de esta lista. Prefetch es
+    # gestionado automaticamente por Windows para acelerar el arranque de apps
+    # frecuentes; borrarlo no libera espacio relevante y solo penaliza la
+    # siguiente ejecucion de cada programa (mito de optimizacion sin beneficio real).
 )
 foreach ($p in $tempPaths) {
     Invoke-Clean -Path $p -Category "Archivos Temporales" -Recurse
@@ -524,7 +630,14 @@ if ($DryRun) {
 # --- 13. Puntos de restauracion de mas de 1 ano ---
 Step-Progress -Number 13 -Message "Revisando puntos de restauracion antiguos..."
 try {
-    $restorePoints = Get-CimInstance -ClassName Win32_ShadowCopy -ErrorAction Stop | Sort-Object InstallDate
+    # NOTA (v2.0): se filtra por Context = "ClientAccessible", que es el contexto
+    # que usa System Restore para sus puntos de restauracion. Sin este filtro,
+    # Win32_ShadowCopy devuelve TODAS las shadow copies del volumen, incluyendo
+    # las que pueda estar usando software de backup de terceros (VSS), con
+    # riesgo de borrarlas sin que el usuario lo sepa.
+    $restorePoints = Get-CimInstance -ClassName Win32_ShadowCopy -ErrorAction Stop |
+        Where-Object { $_.Context -eq "ClientAccessible" } |
+        Sort-Object InstallDate
     $totalPoints = $restorePoints.Count
     $rpDeletedCount = 0
 
@@ -705,6 +818,9 @@ if ($DryRun) {
 } elseif ($Silent -and -not $Monthly) {
     Log "  -> Paso omitido en ejecucion silenciosa semanal (solo se ejecuta en la mensual)."
     Add-Summary "Verificacion de disco (chkdsk): omitida (ejecucion silenciosa semanal)."
+} elseif ($Silent -and $Monthly -and $script:SkipHeavyScansOnBattery) {
+    Log "  -> Paso omitido: equipo portatil con bateria baja ($($script:BatteryPercent)%) y sin cargador conectado."
+    Add-Summary "Verificacion de disco (chkdsk): omitida (bateria baja, sin cargador)."
 } else {
     $ejecutarChkdsk = $true
     if (-not $Silent) {
@@ -740,6 +856,9 @@ if ($DryRun) {
 } elseif ($Silent -and -not $Monthly) {
     Log "  -> Paso omitido en ejecucion silenciosa semanal (solo se ejecuta en la mensual)."
     Add-Summary "Escaneo de Windows Defender: omitido (ejecucion silenciosa semanal)."
+} elseif ($Silent -and $Monthly -and $script:SkipHeavyScansOnBattery) {
+    Log "  -> Paso omitido: equipo portatil con bateria baja ($($script:BatteryPercent)%) y sin cargador conectado."
+    Add-Summary "Escaneo de Windows Defender: omitido (bateria baja, sin cargador)."
 } else {
     $ejecutarDefender = $true
     if (-not $Silent) {
@@ -778,15 +897,47 @@ if ($DryRun) {
 # --- 18. Limpieza avanzada del sistema (cleanmgr con perfil configurado) ---
 Step-Progress -Number 18 -Message "Ejecutando liberador de espacio en disco de Windows..."
 if ($DryRun) {
-    Log "  [SIMULACION] Se ejecutaria el Liberador de espacio en disco de Windows (cleanmgr)."
+    Log "  [SIMULACION] Se configuraria el perfil de cleanmgr y se ejecutaria el Liberador de espacio en disco."
     Add-Summary "Liberador de espacio en disco (cleanmgr): omitido en modo simulacion."
 } else {
+    # NOTA (v2.0): "cleanmgr /sagerun:1" solo limpia las categorias marcadas
+    # previamente con "/sageset:1" en el registro. Sin ese perfil, /sagerun:1
+    # no hace nada (bug detectado en la auditoria: el paso se reportaba como
+    # "ejecutado" aunque no liberara espacio real). Aqui se configura el perfil
+    # 1 con un conjunto conservador de categorias seguras antes de ejecutarlo.
+    $cleanmgrCategorias = @(
+        "Active Setup Temp Folders", "Temporary Files", "Recycle Bin",
+        "Temporary Setup Files", "Setup Log Files", "Thumbnail Cache",
+        "Windows Error Reporting Files", "Delivery Optimization Files",
+        "Windows Upgrade Log Files", "System error memory dump files",
+        "System error minidump files"
+    )
+    $cleanmgrBaseKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches"
+    $cleanmgrConfigurado = $false
     try {
-        Start-Process -FilePath cleanmgr.exe -ArgumentList "/sagerun:1" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
-        Add-Summary "Liberador de espacio en disco (cleanmgr): ejecutado."
+        foreach ($cat in $cleanmgrCategorias) {
+            $catKey = "$cleanmgrBaseKey\$cat"
+            if (Test-Path $catKey -ErrorAction SilentlyContinue) {
+                New-ItemProperty -Path $catKey -Name "StateFlags0001" -Value 2 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+                $cleanmgrConfigurado = $true
+            }
+        }
     } catch {
-        Log "  -> cleanmgr no disponible en este equipo, se omite."
-        Add-Summary "Liberador de espacio en disco (cleanmgr): no disponible en este equipo."
+        Log "  -> No se pudo configurar el perfil de cleanmgr (se ejecutara con el perfil que ya existiera, si existe)."
+    }
+
+    if (-not $cleanmgrConfigurado) {
+        Log "  -> No se encontraron categorias de VolumeCaches para configurar; se omite cleanmgr (no habria nada que limpiar de forma fiable)."
+        Add-Summary "Liberador de espacio en disco (cleanmgr): omitido (no se pudo configurar el perfil de limpieza)."
+    } else {
+        try {
+            Start-Process -FilePath cleanmgr.exe -ArgumentList "/sagerun:1" -WindowStyle Hidden -Wait -ErrorAction Stop
+            Log "  -> Liberador de espacio en disco ejecutado con el perfil configurado."
+            Add-Summary "Liberador de espacio en disco (cleanmgr): ejecutado con perfil de limpieza configurado."
+        } catch {
+            Log "  -> cleanmgr no disponible en este equipo, se omite."
+            Add-Summary "Liberador de espacio en disco (cleanmgr): no disponible en este equipo."
+        }
     }
 }
 
@@ -808,6 +959,94 @@ if ($DryRun) {
     Log "  -> Optimizando unidad C: (puede tardar unos minutos)..."
     Optimize-Volume -DriveLetter C -ErrorAction SilentlyContinue
     Add-Summary "Optimizacion de unidad C: (TRIM en SSD / desfragmentacion en HDD) ejecutada."
+}
+
+# --- 20. Apps UWP con permiso de ejecucion en segundo plano (listado + confirmacion individual) ---
+Step-Progress -Number 20 -Message "Revisando apps con ejecucion en segundo plano..."
+if ($Silent) {
+    Log "  -> Paso omitido en modo automatico/silencioso (requiere confirmacion manual)."
+} else {
+    try {
+        $bgBaseKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications"
+        $bgApps = @()
+        if (Test-Path $bgBaseKey) {
+            $bgApps = Get-ChildItem $bgBaseKey -ErrorAction SilentlyContinue | ForEach-Object {
+                $disabled = (Get-ItemProperty -Path $_.PSPath -Name "Disabled" -ErrorAction SilentlyContinue).Disabled
+                [PSCustomObject]@{ Pfn = $_.PSChildName; Key = $_.PSPath; CurrentlyDisabled = ($disabled -eq 1) }
+            } | Where-Object { -not $_.CurrentlyDisabled }
+        }
+
+        if ($bgApps.Count -gt 0) {
+            Write-Host "`nApps con permiso de ejecucion en segundo plano (actualmente activo):"
+            $i = 1
+            foreach ($app in $bgApps) {
+                Write-Host "   [$i] $($app.Pfn)"
+                $i++
+            }
+            Write-Host "Desactivar esto NO desinstala la app, solo evita que siga activa" -ForegroundColor Yellow
+            Write-Host "en segundo plano cuando no la estas usando (ahorra CPU/RAM/bateria)." -ForegroundColor Yellow
+
+            $bgDisabledCount = 0
+            $bgKeptCount = 0
+            foreach ($app in $bgApps) {
+                $r = Read-Host "Desactivar ejecucion en segundo plano de '$($app.Pfn)'? (S/N)"
+                if ($r -match "^[SsYy]") {
+                    if ($DryRun) {
+                        Log "  [SIMULACION] Se desactivaria segundo plano de: $($app.Pfn)"
+                        $bgDisabledCount++
+                        continue
+                    }
+                    try {
+                        New-ItemProperty -Path $app.Key -Name "Disabled" -Value 1 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+                        New-ItemProperty -Path $app.Key -Name "DisabledByUser" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+                        Log "  -> Desactivado: $($app.Pfn)"
+                        $bgDisabledCount++
+                    } catch {
+                        Log "  -> No se pudo desactivar: $($app.Pfn) - $($_.Exception.Message)"
+                    }
+                } else {
+                    Log "  -> Se conservo: $($app.Pfn)"
+                    $bgKeptCount++
+                }
+            }
+            Add-Summary "Apps en segundo plano: $bgDisabledCount desactivadas, $bgKeptCount conservadas (de $($bgApps.Count) activas detectadas)."
+        } else {
+            Log "  -> No se encontraron apps con ejecucion en segundo plano activa (o la funcion esta gestionada de otra forma en este equipo)."
+            Add-Summary "Apps en segundo plano: no se encontraron activas para revisar."
+        }
+    } catch {
+        Log "  -> No se pudo revisar las apps en segundo plano."
+        Add-Summary "Apps en segundo plano: no se pudo obtener la lista."
+    }
+}
+
+# --- 21. Diagnostico (solo lectura, SIN cambios) de servicios de terceros en inicio automatico ---
+Step-Progress -Number 21 -Message "Diagnostico de servicios de terceros en inicio automatico..."
+if ($Silent) {
+    Log "  -> Paso omitido en modo automatico/silencioso (es informativo y alargaria la tarea programada)."
+} else {
+    try {
+        # Solo se listan servicios de terceros (sin firma de Microsoft) configurados en
+        # inicio Automatico. NO se modifica ni desactiva nada: es puramente informativo,
+        # ya que decidir que servicio de terceros es seguro desactivar requiere conocer
+        # sus dependencias caso por caso.
+        $thirdPartyAuto = Get-CimInstance -ClassName Win32_Service -ErrorAction Stop |
+            Where-Object { $_.StartMode -eq "Auto" -and $_.PathName -and $_.PathName -notmatch "\\Windows\\(System32|SysWOW64)\\" }
+
+        if ($thirdPartyAuto.Count -gt 0) {
+            Log "  -> Servicios de terceros en inicio Automatico (solo informativo, sin cambios):"
+            foreach ($svc in $thirdPartyAuto) {
+                Log "     - $($svc.DisplayName) [$($svc.Name)] - $($svc.PathName)"
+            }
+            Add-Summary "Diagnostico de servicios de terceros: $($thirdPartyAuto.Count) en inicio automatico (ver log para detalle; no se modifico ninguno)."
+        } else {
+            Log "  -> No se detectaron servicios de terceros evidentes en inicio automatico."
+            Add-Summary "Diagnostico de servicios de terceros: ninguno detectado."
+        }
+    } catch {
+        Log "  -> No se pudo obtener el listado de servicios."
+        Add-Summary "Diagnostico de servicios de terceros: no se pudo obtener la lista."
+    }
 }
 
 # --- (OPCIONAL) Eliminar contrasenas guardadas en navegadores y redes WiFi ---
@@ -870,7 +1109,7 @@ if ($Silent) {
             if (Test-Path $firefoxProfiles) {
                 if ($DryRun) { Log "  [SIMULACION] Se eliminarian las contrasenas de Firefox." }
                 else {
-                    Get-ChildItem $firefoxProfiles -Directory | ForEach-Object {
+                    Get-ChildItem $firefoxProfiles -Directory -ErrorAction SilentlyContinue | ForEach-Object {
                         Remove-Item "$($_.FullName)\logins.json" -Force -ErrorAction SilentlyContinue
                         Remove-Item "$($_.FullName)\key4.db" -Force -ErrorAction SilentlyContinue
                     }
@@ -918,7 +1157,7 @@ if ($Silent) {
 }
 
 # --- Cerrar la barra de progreso ---
-Write-Progress -Activity "Limpieza y Optimizacion de Windows 11" -Completed
+Write-Progress -Activity "Mantenimiento y Limpieza de Windows" -Completed
 
 # --- Calcular espacio recuperado ---
 $driveCAfter = Get-PSDrive C -ErrorAction SilentlyContinue
@@ -990,21 +1229,44 @@ if (-not $Silent -and -not $DryRun) {
     Write-Host "(se creo automaticamente en la primera ejecucion de este script)."
     $schedResp = Read-Host "Programar este script para ejecutarse solo? (S = Semanal, M = Mensual, N = No)"
 
+    # NOTA (v2.0): nombre actual de la tarea, y nombres usados por versiones
+    # anteriores del script. Al reprogramar, se eliminan las tareas legacy para
+    # no dejar tareas duplicadas/huerfanas apuntando a un script ya renombrado.
+    $currentTaskName = "MantenimientoWindows"
+    $legacyTaskNames = @("LimpiezaOptimizacionWindows11")
+
+    function Remove-LegacyScheduledTasks {
+        param([string[]]$Names, [string]$KeepName)
+        foreach ($n in $Names) {
+            if ($n -eq $KeepName) { continue }
+            schtasks /Query /TN $n 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                schtasks /Delete /TN $n /F 2>$null | Out-Null
+                Log "  -> Tarea programada de una version anterior eliminada: $n"
+            }
+        }
+    }
+
     if (-not (Test-Path $stableScriptPath)) {
         Write-Host "  -> No se encontro la copia en $optimizerDir, no se puede programar la tarea." -ForegroundColor Red
         Log "  -> Programacion cancelada: no existe $stableScriptPath."
     } elseif ($schedResp -match "^[Ss]") {
-        $taskName = "LimpiezaOptimizacionWindows11"
+        Remove-LegacyScheduledTasks -Names $legacyTaskNames -KeepName $currentTaskName
+        $taskName = $currentTaskName
         $trArg = "-NoProfile -ExecutionPolicy Bypass -File `"$stableScriptPath`" -Silent"
-        schtasks /Create /SC WEEKLY /D SUN /TN $taskName /TR "powershell.exe $trArg" /ST 20:00 /RL HIGHEST /F | Out-Null
-        Log "  -> Tarea programada creada: se ejecutara todos los domingos a las 8:00 PM (sin chkdsk ni Defender, solo en la mensual)."
+        # NOTA (v2.0): se crea con /RU SYSTEM para que la tarea se ejecute aunque
+        # el usuario no tenga sesion iniciada a esa hora (antes dependia de la
+        # sesion del usuario que la programo, y podia no dispararse nunca).
+        schtasks /Create /SC WEEKLY /D SUN /TN $taskName /TR "powershell.exe $trArg" /ST 20:00 /RL HIGHEST /RU SYSTEM /F | Out-Null
+        Log "  -> Tarea programada creada (como SYSTEM): se ejecutara todos los domingos a las 8:00 PM (sin chkdsk ni Defender, solo en la mensual)."
         Write-Host "  -> Listo. Se ejecutara todos los domingos a las 8:00 PM en modo silencioso." -ForegroundColor Green
         Write-Host "     Nota: chkdsk y el escaneo de Defender solo corren en la tarea mensual." -ForegroundColor DarkGray
     } elseif ($schedResp -match "^[Mm]") {
-        $taskName = "LimpiezaOptimizacionWindows11"
+        Remove-LegacyScheduledTasks -Names $legacyTaskNames -KeepName $currentTaskName
+        $taskName = $currentTaskName
         $trArg = "-NoProfile -ExecutionPolicy Bypass -File `"$stableScriptPath`" -Silent -Monthly"
-        schtasks /Create /SC MONTHLY /D 1 /TN $taskName /TR "powershell.exe $trArg" /ST 20:00 /RL HIGHEST /F | Out-Null
-        Log "  -> Tarea programada creada: se ejecutara el dia 1 de cada mes a las 8:00 PM (incluye chkdsk y escaneo de Defender)."
+        schtasks /Create /SC MONTHLY /D 1 /TN $taskName /TR "powershell.exe $trArg" /ST 20:00 /RL HIGHEST /RU SYSTEM /F | Out-Null
+        Log "  -> Tarea programada creada (como SYSTEM): se ejecutara el dia 1 de cada mes a las 8:00 PM (incluye chkdsk y escaneo de Defender)."
         Write-Host "  -> Listo. Se ejecutara el dia 1 de cada mes a las 8:00 PM en modo silencioso." -ForegroundColor Green
         Write-Host "     Esta ejecucion mensual tambien incluye chkdsk /scan y el escaneo de Defender." -ForegroundColor Green
     } else {
