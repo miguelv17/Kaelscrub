@@ -752,7 +752,18 @@ if ($Silent) {
 
             $startupDisabledCount = 0
             $startupKeptCount = 0
+            $startupRevisar = $true
+            if (-not $DryRun) {
+                Write-Host "Si no sabes cual elegir, o son demasiados, puedes omitir este paso" -ForegroundColor DarkGray
+                Write-Host "por completo: no se tocara ninguno." -ForegroundColor DarkGray
+                $rTodos = Read-Host "Revisar la lista uno por uno (S), u omitir todos sin tocar nada (N)? (S/N)"
+                $startupRevisar = $rTodos -match "^[SsYy]"
+            }
 
+            if (-not $startupRevisar) {
+                Log "  -> Paso omitido por el usuario: no se reviso ningun programa de inicio."
+                Add-Summary "Programas de inicio: paso omitido por el usuario ($($startupItems.Count) detectados, ninguno revisado)."
+            } else {
             foreach ($item in $startupItems) {
                 $r = Read-Host "Desactivar el inicio automatico de '$($item.Name)'? (S/N)"
                 if ($r -match "^[SsYy]") {
@@ -800,6 +811,7 @@ if ($Silent) {
                 }
             }
             Add-Summary "Programas de inicio: $startupDisabledCount desactivados, $startupKeptCount conservados (de $($startupItems.Count) detectados)."
+            }
         } else {
             Log "  -> No se encontraron programas de inicio automatico."
             Add-Summary "Programas de inicio: no se encontraron."
@@ -988,6 +1000,17 @@ if ($Silent) {
 
             $bgDisabledCount = 0
             $bgKeptCount = 0
+            $bgRevisar = $true
+            if (-not $DryRun) {
+                Write-Host "Si no sabes que app elegir, o son demasiadas, puedes omitir este paso" -ForegroundColor DarkGray
+                Write-Host "por completo: no se tocara ninguna." -ForegroundColor DarkGray
+                $rTodas = Read-Host "Revisar la lista una por una (S), u omitir todas sin tocar nada (N)? (S/N)"
+                $bgRevisar = $rTodas -match "^[SsYy]"
+            }
+            if (-not $bgRevisar) {
+                Log "  -> Paso omitido por el usuario: no se reviso ninguna app en segundo plano."
+                Add-Summary "Apps en segundo plano: paso omitido por el usuario ($($bgApps.Count) detectadas, ninguna revisada)."
+            } else {
             foreach ($app in $bgApps) {
                 $r = Read-Host "Desactivar ejecucion en segundo plano de '$($app.Pfn)'? (S/N)"
                 if ($r -match "^[SsYy]") {
@@ -1010,6 +1033,7 @@ if ($Silent) {
                 }
             }
             Add-Summary "Apps en segundo plano: $bgDisabledCount desactivadas, $bgKeptCount conservadas (de $($bgApps.Count) activas detectadas)."
+            }
         } else {
             Log "  -> No se encontraron apps con ejecucion en segundo plano activa (o la funcion esta gestionada de otra forma en este equipo)."
             Add-Summary "Apps en segundo plano: no se encontraron activas para revisar."
