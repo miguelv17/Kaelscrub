@@ -174,7 +174,7 @@ Este script modifica archivos y configuración del sistema. Aunque incluye un pu
 
 ## Licencia
 
-Sin licencia definida todavía. Si vas a publicar este repositorio, añade un archivo `LICENSE` (por ejemplo, MIT) para dejar claro cómo puede usarse y modificarse el código.
+Distribuido bajo licencia [MIT](LICENSE).
 
 ---
 
